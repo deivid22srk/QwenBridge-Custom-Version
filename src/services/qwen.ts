@@ -1359,7 +1359,15 @@ function isQwenQuotaLimitMessage(details: string): boolean {
     normalized.includes("token-limit") ||
     normalized.includes("insufficient quota") ||
     normalized.includes("rate limit") ||
-    normalized.includes("ratelimited")
+    normalized.includes("ratelimited") ||
+    // PT-BR messages returned by chat.qwen.ai for some accounts/regions
+    normalized.includes("quota_limit") ||
+    normalized.includes("alta demanda") ||
+    normalized.includes("tente novamente") ||
+    normalized.includes("cota excedida") ||
+    normalized.includes("limite de cota") ||
+    normalized.includes("high demand") ||
+    normalized.includes("try again later")
   );
 }
 
@@ -1469,9 +1477,24 @@ function parseQwenJsonError(
         : "";
     const message = `Qwen upstream error: ${code}: ${details}.${wait}`;
 
+    // Treat quota_limit / quota_exceeded / RateLimited / 429 / PT-BR "alta
+    // demanda" / "Tente novamente mais tarde" as rate-limit so the orchestrator
+    // retries with backoff + account rotation instead of failing hard.
+    const normalizedCode = (code || "").toLowerCase();
+    const isQuotaCode =
+      normalizedCode === "ratelimited" ||
+      normalizedCode === "rate_limited" ||
+      normalizedCode === "quota_limit" ||
+      normalizedCode === "quota_exceeded" ||
+      normalizedCode === "insufficient_quota" ||
+      normalizedCode.includes("quota") ||
+      normalizedCode.includes("rate_limit") ||
+      normalizedCode.includes("ratelimit");
+
     if (
       code === "RateLimited" ||
       status === 429 ||
+      isQuotaCode ||
       (typeof details === "string" && isQwenQuotaLimitMessage(details))
     ) {
       return new UpstreamRateLimit(message);

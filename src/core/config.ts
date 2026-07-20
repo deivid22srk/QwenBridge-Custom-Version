@@ -77,6 +77,11 @@ const envSchema = z
     RETRY_MAX_DELAY_MS: z.string().default("10000"),
     ANTI_BOT_BASE_DELAY_MS: z.string().default("5000"),
     ANTI_BOT_MAX_DELAY_MS: z.string().default("30000"),
+    // Quota-limit retry tuning (used when upstream returns `quota_limit`,
+    // `quota_exceeded`, "alta demanda", "try again later", etc.)
+    QUOTA_RETRY_MAX_ATTEMPTS: z.string().default("5"),
+    QUOTA_RETRY_BASE_DELAY_MS: z.string().default("2000"),
+    QUOTA_RETRY_MAX_DELAY_MS: z.string().default("30000"),
     QWEN_BASE_URL: z.string().default("https://chat.qwen.ai"),
     QWEN_CHAT_POOL_SIZE: z.string().default("1"),
     QWEN_CHAT_POOL_MODELS: z.string().default("qwen3.7-plus"),
@@ -231,6 +236,9 @@ export const config = {
   retry: {
     baseDelayMs: parseInt(env.RETRY_BASE_DELAY_MS),
     maxDelayMs: parseInt(env.RETRY_MAX_DELAY_MS),
+    quotaMaxAttempts: Math.max(1, parseInt(env.QUOTA_RETRY_MAX_ATTEMPTS)),
+    quotaBaseDelayMs: parseInt(env.QUOTA_RETRY_BASE_DELAY_MS),
+    quotaMaxDelayMs: parseInt(env.QUOTA_RETRY_MAX_DELAY_MS),
   },
   antiBot: {
     baseDelayMs: parseInt(env.ANTI_BOT_BASE_DELAY_MS),

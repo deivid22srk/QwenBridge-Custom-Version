@@ -35,7 +35,7 @@ import { sendOpenAIError, createError } from "../../api/error-helpers.js";
 import { classifyError } from "../../api/error-classifier.js";
 import type { QwenBridgeStatusCode } from "../../core/errors.js";
 import { config } from "../../core/config.js";
-import { parseQwenErrorPayload } from "./errors.ts";
+import { parseQwenErrorPayload, isQuotaLimitError } from "./errors.ts";
 import {
   logTokenEstimationSample,
   type TokenEstimationContext,
@@ -373,12 +373,13 @@ export async function processNonStreamingResponse(
               );
             }
 
-            // Quota exceeded in SSE chunk — retryable (try other account)
-            if (
-              errDetails.includes("Allocated quota exceeded") ||
-              errDetails.includes("quota exceeded") ||
-              errDetails.includes("token-limit")
-            ) {
+            // Quota exceeded in SSE chunk — retryable (try other account).
+            // Covers `quota_limit`, `quota_exceeded`, `RateLimited`, EN/PT-BR
+            // messages like "O serviço está com alta demanda no momento.
+            // Tente novamente mais tarde." that the upstream returns under
+            // high load. Treating these as retryable allows the orchestrator
+            // in routes/chat/index.ts to switch accounts and re-stream.
+            if (isQuotaLimitError(errCode, errDetails)) {
               throw new RetryableQwenStreamError(
                 `Qwen quota: ${errCode}: ${errDetails.substring(0, 200)}`,
                 config.retry.baseDelayMs,
@@ -1161,11 +1162,12 @@ export async function processStreamingResponse(
               }
 
               // Quota exceeded in SSE chunk — retryable (try other account)
-              if (
-                errDetails.includes("Allocated quota exceeded") ||
-                errDetails.includes("quota exceeded") ||
-                errDetails.includes("token-limit")
-              ) {
+              // Covers `quota_limit`, `quota_exceeded`, `RateLimited`, EN/PT-BR
+              // messages like "O serviço está com alta demanda no momento.
+              // Tente novamente mais tarde." that the upstream returns under
+              // high load. Treating these as retryable allows the orchestrator
+              // in routes/chat/index.ts to switch accounts and re-stream.
+              if (isQuotaLimitError(errCode, errDetails)) {
                 throw new RetryableQwenStreamError(
                   `Qwen quota: ${errCode}: ${errDetails.substring(0, 200)}`,
                   config.retry.baseDelayMs,

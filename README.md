@@ -207,6 +207,9 @@ O Playwright também aplica um fingerprint estável por conta (UA Chrome 149, lo
 | `RETRY_MAX_DELAY_MS` | `10000` | Cap do exponential backoff. |
 | `ANTI_BOT_BASE_DELAY_MS` | `5000` | Delay base para erros anti-bot. |
 | `ANTI_BOT_MAX_DELAY_MS` | `30000` | Cap do exponential backoff anti-bot. |
+| `QUOTA_RETRY_MAX_ATTEMPTS` | `5` | Número máximo de tentativas quando o upstream retorna `quota_limit` / "alta demanda" / "Tente novamente mais tarde". |
+| `QUOTA_RETRY_BASE_DELAY_MS` | `2000` | Delay base (ms) para o backoff exponencial entre tentativas de quota. |
+| `QUOTA_RETRY_MAX_DELAY_MS` | `30000` | Cap (ms) do backoff exponencial de quota. |
 | `ACCOUNT_COOLDOWN_MS` | `60000` | Cooldown padrão (Qwen sobrescreve quando informa tempo). |
 
 ### Timeouts
@@ -244,17 +247,17 @@ O Playwright também aplica um fingerprint estável por conta (UA Chrome 149, lo
 
 ---
 
-## Anti-bot
+## Anti-bot e Quota
 
-O QwenBridge detecta automaticamente erros de anti-bot:
+O QwenBridge detecta automaticamente erros de anti-bot e de quota:
 
-- `FAIL_SYS_USER_VALIDATE`
-- `RGV587_ERROR`
+- **Anti-bot:** `FAIL_SYS_USER_VALIDATE`, `RGV587_ERROR`
+- **Quota:** `quota_limit`, `quota_exceeded`, `RateLimited`, `Allocated quota exceeded`, `token-limit`, `insufficient quota`, `rate limit`, e mensagens em português como "O serviço está com alta demanda no momento. Tente novamente mais tarde.", "alta demanda", "tente novamente", "cota excedida".
 
 **Fluxo:**
-1. Erro detectado → retry com delay exponencial + jitter
-2. Retry falha → rotação para próxima conta
-3. Todas falham → erro retornado ao cliente
+1. Erro detectado → retry com delay exponencial + jitter (até `QUOTA_RETRY_MAX_ATTEMPTS` tentativas)
+2. Cada retry marca a conta atual como em cooldown e tenta uma conta diferente
+3. Todas as tentativas falham → erro retornado ao cliente
 
 **Com Playwright:** Cada conta tem seu próprio fingerprint (`bx-ua`, `bx-umidtoken`) capturado do browser real.
 

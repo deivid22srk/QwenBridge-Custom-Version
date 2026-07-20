@@ -521,8 +521,13 @@ export async function chatCompletions(c: Context) {
       },
     };
 
-    // Retry loop for stream processing errors (quota/anti-bot during SSE)
-    let streamProcessingRetries = 2;
+    // Retry loop for stream processing errors (quota/anti-bot during SSE).
+    // Quota errors like `quota_limit` / "O serviço está com alta demanda no
+    // momento. Tente novamente mais tarde." are treated as retryable so the
+    // client sees a successful response instead of a hard 502 — the proxy
+    // waits with exponential backoff and re-acquires a (possibly different)
+    // account stream before re-processing.
+    let streamProcessingRetries = config.retry.quotaMaxAttempts;
     let currentStreamResult = streamResult;
     let currentParams = params;
 
@@ -538,19 +543,55 @@ export async function chatCompletions(c: Context) {
           streamErr instanceof RetryableQwenStreamError
         ) {
           streamProcessingRetries--;
+          const attemptNumber =
+            config.retry.quotaMaxAttempts - streamProcessingRetries;
+
+          // Exponential backoff with jitter, capped by config.retry.quotaMaxDelayMs.
+          // Falls back to err.retryAfterMs when the upstream asked us to wait.
+          const baseDelay = streamErr.retryAfterMs > 0
+            ? streamErr.retryAfterMs
+            : config.retry.quotaBaseDelayMs;
+          const exp = Math.min(
+            baseDelay * Math.pow(2, attemptNumber - 1),
+            config.retry.quotaMaxDelayMs,
+          );
+          const jitter = exp * 0.3 * Math.random();
+          const waitMs = Math.floor(exp + jitter);
+
           console.warn(
-            `[Chat] Stream processing error, retrying with new stream | ${streamErr.message?.substring(0, 150)} | retries left: ${streamProcessingRetries}`,
+            `[Chat] Stream quota/anti-bot error (attempt ${attemptNumber}/${config.retry.quotaMaxAttempts}) | retrying in ${waitMs}ms | ${streamErr.message?.substring(0, 150)} | retries left: ${streamProcessingRetries}`,
           );
 
-          // Mark current account for cooldown if it's a quota error
-          if (streamErr.message?.includes("quota")) {
-            const { markAccountRateLimited } =
-              await import("../../core/account-manager.ts");
-            markAccountRateLimited(
-              currentStreamResult.activeAccountId,
-              undefined,
-              "QuotaExceeded",
-            );
+          await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+          // Mark current account for cooldown if it's a quota error so the
+          // account manager prefers a different account on the next acquire.
+          const lowerMessage = streamErr.message?.toLowerCase() || "";
+          const isQuota =
+            lowerMessage.includes("quota") ||
+            lowerMessage.includes("alta demanda") ||
+            lowerMessage.includes("rate limit") ||
+            lowerMessage.includes("ratelimited");
+          if (isQuota) {
+            try {
+              const { markAccountRateLimited } =
+                await import("../../core/account-manager.ts");
+              markAccountRateLimited(
+                currentStreamResult.activeAccountId,
+                undefined,
+                "QuotaExceeded",
+              );
+            } catch (cooldownErr) {
+              logger.warn(
+                "[chat] failed to mark account rate-limited during quota retry",
+                {
+                  error:
+                    cooldownErr instanceof Error
+                      ? cooldownErr.message
+                      : String(cooldownErr),
+                },
+              );
+            }
           }
 
           // Release current chat lock
@@ -590,7 +631,7 @@ export async function chatCompletions(c: Context) {
           }
 
           console.log(
-            `[Chat] Request routed | ${newStreamResult.activeAccountLabel} | ${body.model} | ${msgCount} msg(s) | ${finalPrompt.length} chars${declaredTools.length ? ` | ${declaredTools.length} tool(s)` : ""}${files.length ? ` | ${files.length} file(s)` : ""} | retry`,
+            `[Chat] Request routed | ${newStreamResult.activeAccountLabel} | ${body.model} | ${msgCount} msg(s) | ${finalPrompt.length} chars${declaredTools.length ? ` | ${declaredTools.length} tool(s)` : ""}${files.length ? ` | ${files.length} file(s)` : ""} | retry ${attemptNumber}`,
           );
 
           // Re-acquire chat lock for new stream
