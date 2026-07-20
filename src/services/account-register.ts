@@ -484,7 +484,17 @@ export async function createQwenAccountViaPlaywright(
 
     if (hasCaptcha) {
       await sleep(800);
-      const captcha = await solveQwenPuzzleOnPage(page, { maxAttempts: 10 });
+      // UI fallback path: more attempts than the HTTP/WAF path (which defaults
+      // to 3) because we're already on a slow path. Operators who want fewer
+      // attempts (e.g. to avoid F008 IP throttling) can set
+      // CAPTCHA_UI_FALLBACK_MAX_ATTEMPTS — defaults to 10 to preserve prior
+      // behavior. CAPTCHA_MAX_RETRIES still applies to the HTTP/WAF path.
+      const uiMaxAttempts = Number(
+        process.env.CAPTCHA_UI_FALLBACK_MAX_ATTEMPTS ?? "10",
+      );
+      const captcha = await solveQwenPuzzleOnPage(page, {
+        maxAttempts: uiMaxAttempts,
+      });
       if (!captcha.success) {
         return {
           success: false,

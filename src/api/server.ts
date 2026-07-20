@@ -255,7 +255,29 @@ async function cleanupServerResources(): Promise<void> {
 
 async function handleSignal(signal: string): Promise<never> {
   console.log(`[Server] Shutdown | ${signal}`);
-  await stopServer();
+  // Force-exit after a hard cap so a stuck `stopServer` (e.g. a Playwright
+  // mutex that never resolves because Chromium was killed mid-launch)
+  // can't keep the process alive indefinitely. The cap is generous (10s)
+  // to give in-flight cleanup real time to complete in normal cases.
+  const forceExitTimer = setTimeout(() => {
+    console.error(
+      `[Server] Shutdown timeout — forcing exit (some cleanup may have been skipped).`,
+    );
+    process.exit(1);
+  }, 10_000);
+  // Don't keep the Node event loop alive just for this timer.
+  forceExitTimer.unref();
+  try {
+    await stopServer();
+  } catch (err) {
+    console.error(
+      `[Server] Error during shutdown: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  } finally {
+    clearTimeout(forceExitTimer);
+  }
   process.exit(0);
 }
 
@@ -301,6 +323,20 @@ export async function startServer(options?: {
   }
 
   startPromise = (async () => {
+    // Install SIGINT/SIGTERM handlers BEFORE the batch init so that an
+    // operator hitting Ctrl+C during Playwright account initialization
+    // triggers a graceful shutdown (closeAllPlaywright sets the
+    // `closingAllPlaywright` flag, which `initPlaywrightForAccount`
+    // checks to short-circuit pending launches). Without this early
+    // install, SIGINT falls through to Node's default handler, the
+    // child Chromium processes die abruptly, and the in-flight
+    // `initPlaywrightForAccount` promises reject with noisy
+    // "Target page, context or browser has been closed" errors that
+    // pollute the logs and can mask the real cause (Ctrl+C).
+    if (options?.installSignalHandlers !== false) {
+      installSignalHandlers();
+    }
+
     cache = new MemoryCache();
     await cache.connect();
 
@@ -335,7 +371,7 @@ export async function startServer(options?: {
 
     const { disableNativeTools, warmQwenChatPool } =
       await import("../services/qwen.ts");
-    const { initPlaywrightForAccount } =
+    const { initPlaywrightForAccount, isPlaywrightClosing } =
       await import("../services/playwright.ts");
 
     const BATCH_SIZE = config.playwright.initBatchSize;
@@ -346,6 +382,14 @@ export async function startServer(options?: {
       );
 
       for (let i = 0; i < accounts.length; i += BATCH_SIZE) {
+        // Abort remaining batches if shutdown was requested (operator hit
+        // Ctrl+C during the previous batch's `initPlaywrightForAccount`).
+        if (isPlaywrightClosing()) {
+          console.log(
+            `[Server] Shutdown in progress — skipping remaining account batches (started at index ${i}).`,
+          );
+          break;
+        }
         const batch = accounts.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
         const totalBatches = Math.ceil(accounts.length / BATCH_SIZE);
@@ -354,8 +398,12 @@ export async function startServer(options?: {
         );
 
         await Promise.all(
-          batch.map((account: QwenAccount) =>
-            prepareQwenRuntime({
+          batch.map(async (account: QwenAccount) => {
+            // Per-account early bail-out: if shutdown started while this
+            // batch was queued, skip the launch instead of producing
+            // "Target page, context or browser has been closed" errors.
+            if (isPlaywrightClosing()) return;
+            return prepareQwenRuntime({
               accountId: account.id,
               successMessage: `[Server] Account ready (Playwright): ${maskEmail(account.email)}`,
               failureMessage: `[Server] Failed to initialize account ${maskEmail(account.email)}:`,
@@ -374,8 +422,8 @@ export async function startServer(options?: {
               },
               disableNativeTools,
               warmQwenChatPool,
-            }),
-          ),
+            });
+          }),
         );
       }
     } else {

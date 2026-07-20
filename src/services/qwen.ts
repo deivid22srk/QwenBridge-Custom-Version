@@ -1459,11 +1459,40 @@ function parseQwenJsonError(
   if (errorJson?.success === false) {
     const code = errorJson.data?.code || errorJson.code || "UpstreamError";
 
+    // Normalize once — reused for both session-expired and quota detection.
+    const normalizedCode = (code || "").toLowerCase();
+    const normalizedDetails =
+      typeof details === "string" ? details.toLowerCase() : "";
+
+    // Detect session-expired / unauthorized patterns from Qwen.
+    // Covers HTTP 401 and 403, common upstream codes (`Unauthorized`,
+    // `Access_Denied`, `Permission_Denied`, `Forbidden`), EN messages
+    // (login, session, permission to access) and PT-BR messages that the
+    // Qwen backend returns for some accounts/regions — most notably:
+    //   "Você não tem permissão para acessar este recurso. Por favor,
+    //    entre em contato com o seu administrador para obter assistência."
+    // Without this normalization, that PT-BR message falls through to
+    // `QwenUpstreamError` and the account is never marked for re-login,
+    // turning a recoverable session-expired into a permanent 502 loop.
     if (
       status === 401 ||
-      code === "Unauthorized" ||
-      (typeof details === "string" &&
-        (details.includes("login") || details.includes("session")))
+      status === 403 ||
+      normalizedCode === "unauthorized" ||
+      normalizedCode === "access_denied" ||
+      normalizedCode === "access denied" ||
+      normalizedCode === "permission_denied" ||
+      normalizedCode === "permission denied" ||
+      normalizedCode === "forbidden" ||
+      normalizedDetails.includes("login") ||
+      normalizedDetails.includes("session") ||
+      normalizedDetails.includes("permissão para acessar") ||
+      normalizedDetails.includes("permissao para acessar") ||
+      normalizedDetails.includes("permission to access") ||
+      normalizedDetails.includes("não tem permissão") ||
+      normalizedDetails.includes("nao tem permissao") ||
+      normalizedDetails.includes("contate o administrador") ||
+      normalizedDetails.includes("entre em contato com o") ||
+      normalizedDetails.includes("contato com o seu administrador")
     ) {
       return new QwenSessionExpiredError(
         `Session expired: ${details}`,
@@ -1480,7 +1509,6 @@ function parseQwenJsonError(
     // Treat quota_limit / quota_exceeded / RateLimited / 429 / PT-BR "alta
     // demanda" / "Tente novamente mais tarde" as rate-limit so the orchestrator
     // retries with backoff + account rotation instead of failing hard.
-    const normalizedCode = (code || "").toLowerCase();
     const isQuotaCode =
       normalizedCode === "ratelimited" ||
       normalizedCode === "rate_limited" ||

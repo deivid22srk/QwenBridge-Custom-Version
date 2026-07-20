@@ -278,6 +278,18 @@ O Playwright também aplica um fingerprint estável por conta (UA Chrome 149, lo
 | `QUOTA_RETRY_BASE_DELAY_MS` | `2000` | Delay base (ms) para o backoff exponencial entre tentativas de quota. |
 | `QUOTA_RETRY_MAX_DELAY_MS` | `30000` | Cap (ms) do backoff exponencial de quota. |
 | `ACCOUNT_COOLDOWN_MS` | `60000` | Cooldown padrão (Qwen sobrescreve quando informa tempo). |
+| `CAPTCHA_MAX_RETRIES` | `3` | Número máximo de tentativas do captcha solver no fluxo HTTP+WAF (Aliyun). |
+| `CAPTCHA_UI_FALLBACK_MAX_ATTEMPTS` | `10` | Número máximo de tentativas no fluxo UI fallback (Playwright form fill). Maior que o HTTP porque já é um caminho lento. |
+| `CAPTCHA_F008_COOLDOWN_MS` | `900` | Cooldown (ms) entre tentativas após receber `F008` do Aliyun (IP/token throttle). Aumente se estiver atrás de um IP só. |
+| `CAPTCHA_RETRY_COOLDOWN_MS` | `400` | Cooldown (ms) entre tentativas para códigos diferentes de `F008` (`F015`, `F001`, etc.). |
+
+### Sessão expirada e re-login
+
+| Variável | Default | Descrição |
+|---|---|---|
+| — (hardcoded) | `15 min` | Cooldown aplicado a uma conta quando o re-login falha após `QwenSessionExpiredError`. Use `npm run login` para renovar manualmente as credenciais. |
+
+> **Detecção de sessão expirada (PT-BR):** o proxy detecta automaticamente mensagens do Qwen como *"Você não tem permissão para acessar este recurso. Por favor, entre em contato com o seu administrador para obter assistência."* e as classifica como `QwenSessionExpiredError` (em vez de `QwenUpstreamError` 502). Isso dispara o fluxo de re-login automático e, se ele falhar, marca a conta com cooldown de 15 min para evitar loop infinito na mesma conta quebrada.
 
 ### Timeouts
 
@@ -522,7 +534,11 @@ Fork mantido por **[@deivid22srk](https://github.com/deivid22srk)** com foco em 
 
 1. **Retry automático para `quota_limit`** — O upstream tratava `quota_limit` (e a mensagem PT-BR "alta demanda") como erro 502 definitivo. Este fork detecta esses casos e aplica retry com backoff exponencial (até `QUOTA_RETRY_MAX_ATTEMPTS` tentativas, padrão 5) + rotação de conta.
 2. **Adicionar contas em lote** — Nova opção `[B]` no `npm run login` para colar várias contas de uma vez (aceita 4 formatos: par de linhas, `email:senha`, `email senha`, `.env`).
-3. **README em PT-BR alinhado ao fork** — Sem referências ao repositório `johngbl/QwenBridge` original.
+3. **Detecção de sessão expirada PT-BR** — O upstream não reconhecia a mensagem *"Você não tem permissão para acessar este recurso..."* do Qwen e a tratava como erro 502. Este fork classifica corretamente como `QwenSessionExpiredError`, dispara re-login e, se falhar, marca a conta com cooldown de 15 min (motivo `SessionExpired`) para evitar loop infinito na mesma conta quebrada.
+4. **Shutdown gracioso durante o batch init** — O upstream só instalava signal handlers APÓS o batch init de Playwright, então Ctrl+C durante o startup matava Chromium abruptamente e produzia erros ruidosos *"Target page, context or browser has been closed"*. Este fork instala signal handlers ANTES do batch e adiciona flag `closingAllPlaywright` checado em `initPlaywrightForAccount` + loop de batches para abortar limpo.
+5. **Force-exit timeout no shutdown** — Se `stopServer` pendurar (ex.: mutex Playwright preso), o processo sai em 10s em vez de ficar travado.
+6. **Captcha solver configurável** — Novas env vars `CAPTCHA_MAX_RETRIES`, `CAPTCHA_UI_FALLBACK_MAX_ATTEMPTS`, `CAPTCHA_F008_COOLDOWN_MS`, `CAPTCHA_RETRY_COOLDOWN_MS` para ajustar tentativas e cooldowns do solver Aliyun sem recompilar.
+7. **README em PT-BR alinhado ao fork** — Sem referências ao repositório `johngbl/QwenBridge` original.
 
 **Veja também:**
 - Upstream original: https://github.com/AnThophicous/QwenBridge-Custom-Version

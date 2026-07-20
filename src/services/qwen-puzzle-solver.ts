@@ -604,7 +604,9 @@ export async function solveQwenPuzzleOnPage(
   options: { maxAttempts?: number; debugDir?: string } = {},
 ): Promise<PuzzleSolveResult> {
   // Few attempts: each verify burns risk score. Default 3 (was 5 → F008).
-  const maxAttempts = options.maxAttempts ?? 3;
+  // Override via CAPTCHA_MAX_RETRIES env var.
+  const maxAttempts =
+    options.maxAttempts ?? Number(process.env.CAPTCHA_MAX_RETRIES ?? "3");
   const debugDir =
     options.debugDir ||
     path.resolve(
@@ -612,6 +614,17 @@ export async function solveQwenPuzzleOnPage(
       "captcha-debug",
       new Date().toISOString().replace(/[:.]/g, "-"),
     );
+
+  // Cooldown between verify attempts (ms). After F008 we wait longer because
+  // the Aliyun risk engine throttles the IP/token — burning more verifies
+  // immediately just produces more F008s. Tunable via env so operators can
+  // lengthen it when running behind a single IP.
+  const cooldownAfterF008Ms = Number(
+    process.env.CAPTCHA_F008_COOLDOWN_MS ?? "900",
+  );
+  const cooldownDefaultMs = Number(
+    process.env.CAPTCHA_RETRY_COOLDOWN_MS ?? "400",
+  );
 
   const verify = attachVerifyWatcher(page);
   let lastCode: string | null = null;
@@ -851,7 +864,7 @@ export async function solveQwenPuzzleOnPage(
         await sleep(150);
       }
 
-      await sleep(lastCode === "F008" ? 900 : 400);
+      await sleep(lastCode === "F008" ? cooldownAfterF008Ms : cooldownDefaultMs);
     } catch (err) {
       swarn(
         `[PuzzleSolver] attempt ${attempt}:`,

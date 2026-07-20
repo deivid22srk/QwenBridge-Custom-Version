@@ -94,6 +94,19 @@ const profileResetQueue = new Map<string, Promise<void>>();
 let profileResetChain: Promise<void> = Promise.resolve();
 let closingAllPlaywright = false;
 
+/**
+ * Returns true once `closeAllPlaywright()` has been invoked (typically from
+ * the SIGINT/SIGTERM handler). Used by:
+ *  - `initPlaywrightForAccount` to skip work that would race with shutdown
+ *  - the batch-init loop in `api/server.ts` to abort pending batches
+ *  - `prepareQwenRuntime` callers to short-circuit account initialization
+ *    instead of producing noisy "Target page, context or browser has been
+ *    closed" errors when the operator hits Ctrl+C during startup.
+ */
+export function isPlaywrightClosing(): boolean {
+  return closingAllPlaywright;
+}
+
 type KillableProcess = {
   killed?: boolean;
   kill: (signal?: NodeJS.Signals | number) => boolean;
@@ -377,6 +390,17 @@ export async function initPlaywrightForAccount(
   headless = true,
   browserType: BrowserType = "chromium",
 ): Promise<void> {
+  // Early bail-out: if shutdown is in progress (operator hit Ctrl+C),
+  // don't even try to launch a browser — it would race with
+  // closeAllPlaywright and surface as "Target page, context or browser
+  // has been closed" noise in the logs.
+  if (closingAllPlaywright) {
+    console.log(
+      `[Playwright] Skipping init for ${maskEmail(account.email)} — shutdown in progress`,
+    );
+    return;
+  }
+
   if (accountPages.has(account.id)) {
     console.log(
       `[Playwright] Already initialized for ${maskEmail(account.email)}`,
@@ -386,7 +410,14 @@ export async function initPlaywrightForAccount(
 
   const release = await getAccountMutex(account.id).acquire();
   try {
-    // Double-check after acquiring lock
+    // Double-check after acquiring lock (shutdown may have started while we
+    // were waiting for the mutex).
+    if (closingAllPlaywright) {
+      console.log(
+        `[Playwright] Skipping init for ${maskEmail(account.email)} — shutdown in progress`,
+      );
+      return;
+    }
     if (accountPages.has(account.id)) {
       console.log(
         `[Playwright] Already initialized for ${maskEmail(account.email)}`,

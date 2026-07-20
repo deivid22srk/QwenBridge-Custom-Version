@@ -737,6 +737,33 @@ async function tryCreateStreamWithRetry(
       );
       const reLoginOk = await attemptRelogin(accountId, accountEmail);
       if (reLoginOk) continue;
+      // Re-login failed: mark the account with a moderate cooldown so the
+      // next request skips it and tries another account, instead of
+      // re-picking the same broken account in a loop. 15 min is long
+      // enough to let the operator refresh creds via `npm run login`
+      // but short enough to recover automatically if the issue was
+      // transient (e.g. upstream maintenance window).
+      try {
+        const { markAccountRateLimited } = await import(
+          "../../core/account-manager.ts"
+        );
+        markAccountRateLimited(
+          accountId,
+          15 * 60 * 1000,
+          "SessionExpired",
+        );
+        console.warn(
+          `[Chat] Session expired for ${accountEmail} (${accountId}); marked for 15min cooldown (SessionExpired).`,
+        );
+      } catch (cooldownErr) {
+        // Don't shadow the original session-expired error if cooldown
+        // marking fails — just log it.
+        console.warn(
+          `[Chat] Failed to mark account cooldown after session expiry: ${
+            cooldownErr instanceof Error ? cooldownErr.message : String(cooldownErr)
+          }`,
+        );
+      }
       return { success: false, error: err };
     }
 
