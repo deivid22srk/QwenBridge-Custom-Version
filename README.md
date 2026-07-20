@@ -1,11 +1,15 @@
-# QwenBridge
+# QwenBridge — Custom Version
 
-API compatível com OpenAI que conecta clientes ao **Qwen (`chat.qwen.ai`)** com suporte a múltiplas contas, tool calling robusto, uploads multimodais e sessões persistentes. Inclui modo Playwright com stealth para evasão de anti-bot, rotação com cooldown, variantes `-no-thinking`, sumarização de contexto, cache comprimido e observabilidade.
+> Fork mantido por **[@deivid22srk](https://github.com/deivid22srk)** — repositório oficial: **https://github.com/deivid22srk/QwenBridge-Custom-Version**
+>
+> Fork upstream original: https://github.com/AnThophicous/QwenBridge-Custom-Version
 
-[![CI](https://github.com/johngbl/QwenBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/johngbl/QwenBridge/actions/workflows/ci.yml)
+API compatível com OpenAI que conecta clientes ao **Qwen (`chat.qwen.ai`)** com suporte a múltiplas contas, tool calling robusto, uploads multimodais e sessões persistentes. Inclui modo Playwright com stealth para evasão de anti-bot, rotação com cooldown, variantes `-no-thinking`, sumarização de contexto, cache comprimido, observabilidade e **retry automático para erros de quota do Qwen upstream** (`quota_limit`, "alta demanda", "Tente novamente mais tarde").
+
 [![TypeScript](https://img.shields.io/badge/TypeScript-6.0-blue)](https://www.typescriptlang.org/)
 [![Hono](https://img.shields.io/badge/Hono-4.12-green)](https://hono.dev/)
 [![License: ISC](https://img.shields.io/badge/License-ISC-yellow.svg)](LICENSE)
+[![Repo](https://img.shields.io/badge/repo-deivid22srk%2FQwenBridge--Custom--Version-purple)](https://github.com/deivid22srk/QwenBridge-Custom-Version)
 
 ---
 
@@ -15,6 +19,8 @@ API compatível com OpenAI que conecta clientes ao **Qwen (`chat.qwen.ai`)** com
 - **Compatibilidade Anthropic** — Endpoint `/v1/messages` para SDKs Anthropic.
 - **Playwright com stealth** — Captura de headers reais (`bx-ua`, `bx-umidtoken`) por conta com `playwright-extra` e `puppeteer-extra-plugin-stealth`.
 - **Anti-bot retry** — Detecção automática de `FAIL_SYS_USER_VALIDATE`/`RGV587_ERROR` com retry e rotação de conta.
+- **Quota retry (novo neste fork)** — Detecta `quota_limit`, `quota_exceeded`, `RateLimited`, "alta demanda", "Tente novamente mais tarde" (EN e PT-BR) e faz retry automático com backoff exponencial + rotação de conta.
+- **Adicionar contas em lote (novo neste fork)** — Opção `[B]` no `npm run login` para colar várias contas de uma vez (email/senha em linhas separadas, `email:senha`, `email senha` ou formato `.env`).
 - **Dynamic timeouts** — Timeout baseado no tamanho do payload (`120s + 30s/MB`).
 - **Payload size limit** — Validação de tamanho (10MB) antes de enviar ao Qwen.
 - **Modelos Qwen atuais** — Funciona com a família `qwen3.x` e expõe variantes sintéticas `-no-thinking`.
@@ -112,8 +118,8 @@ Usa a mesma janela de contexto do modelo base.
 ### Via npm
 
 ```bash
-git clone https://github.com/johngbl/QwenBridge.git
-cd QwenBridge
+git clone https://github.com/deivid22srk/QwenBridge-Custom-Version.git
+cd QwenBridge-Custom-Version
 npm install
 npx playwright install chromium  # Se usar Playwright
 ```
@@ -139,6 +145,67 @@ QWEN_ACCOUNTS=user1@example.com:senha1;user2@example.com:senha2
 > **Dica:** Use `;` como separador preferencial de contas para evitar conflito com `,` em senhas.
 > O formato legado com `,` continua aceito.
 > Senhas com `:`, `#`, espaços e outros caracteres especiais funcionam normalmente.
+
+### Adicionar contas via CLI interativo
+
+```bash
+npm run login
+```
+
+Menu disponível:
+
+| Opção | Descrição |
+|---|---|
+| `[A]` | Adicionar uma conta existente (email + senha) |
+| `[B]` | **Adicionar várias contas em lote** — cole as contas de uma vez |
+| `[C]` | Criar contas automaticamente (mail.tm + captcha) |
+| `[R]` | Remover conta |
+| `[Q]` | Sair |
+
+#### Como usar a opção `[B]` (lote)
+
+Selecione `[B]` no menu e cole as contas no formato que preferir. **Todos os formatos abaixo são aceitos** (podem ser misturados no mesmo paste):
+
+**Formato 1 — Email na linha 1, senha na linha 2 (um par por conta):**
+
+```
+Exemplo1@gmail.com
+Exemplosenha1
+
+Exemplo2@gmail.com
+Exemplosenha2
+
+Exemplo3@gmail.com
+Exemplosenha3
+```
+
+**Formato 2 — `email:senha` por linha:**
+
+```
+Exemplo1@gmail.com:Exemplosenha1
+Exemplo2@gmail.com:Exemplosenha2
+Exemplo3@gmail.com:Exemplosenha3
+```
+
+**Formato 3 — `email senha` (separados por espaço/tab):**
+
+```
+Exemplo1@gmail.com Exemplosenha1
+Exemplo2@gmail.com Exemplosenha2
+```
+
+**Formato 4 — Estilo `.env` (uma única linha):**
+
+```
+Exemplo1@gmail.com:Exemplosenha1;Exemplo2@gmail.com:Exemplosenha2;Exemplo3@gmail.com:Exemplosenha3
+```
+
+**Regras:**
+- Linhas em branco entre contas são ignoradas.
+- Linhas começadas com `#` são tratadas como comentário.
+- Senhas com `:`, `;`, `#`, espaços funcionam normalmente (desde que o formato escolhido não use esses caracteres como separador).
+- Após colar, pressione **Enter duas vezes** em linha vazia (ou digite `END` / `DONE`) para finalizar a entrada.
+- O sistema mostra um resumo (`ok`/`skip`/`fail`) antes de confirmar a importação. Contas que já existem são marcadas como `skip` (não causam erro).
 
 ### Iniciar
 
@@ -438,11 +505,28 @@ QwenBridge/
 | Problema | Solução |
 |---|---|
 | Anti-bot bloqueando | Refaça login da conta e verifique se o Playwright está capturando headers |
-| Quota exceeded | Adicione mais contas ou espere cooldown |
+| `quota_limit` / "alta demanda" | O retry automático já cobre isso. Se persistir, adicione mais contas via `[B]` no `npm run login` ou aumente `QUOTA_RETRY_MAX_ATTEMPTS` |
+| Quota exceeded | Adicione mais contas (use `[B]` no `npm run login` para colar várias de uma vez) ou espere cooldown |
 | Timeout em requests grandes | Aumente `TOTAL_REQUEST_TIMEOUT` |
 | Playwright não inicia | Execute `npx playwright install chromium` |
 | Porta em uso | Altere `PORT` no `.env` |
 | Sessão expirada | Execute `npm run login` para renovar |
+
+---
+
+## Sobre este fork
+
+Fork mantido por **[@deivid22srk](https://github.com/deivid22srk)** com foco em resiliência do retry de quota e usabilidade do CLI de contas.
+
+**Melhorias em relação ao upstream:**
+
+1. **Retry automático para `quota_limit`** — O upstream tratava `quota_limit` (e a mensagem PT-BR "alta demanda") como erro 502 definitivo. Este fork detecta esses casos e aplica retry com backoff exponencial (até `QUOTA_RETRY_MAX_ATTEMPTS` tentativas, padrão 5) + rotação de conta.
+2. **Adicionar contas em lote** — Nova opção `[B]` no `npm run login` para colar várias contas de uma vez (aceita 4 formatos: par de linhas, `email:senha`, `email senha`, `.env`).
+3. **README em PT-BR alinhado ao fork** — Sem referências ao repositório `johngbl/QwenBridge` original.
+
+**Veja também:**
+- Upstream original: https://github.com/AnThophicous/QwenBridge-Custom-Version
+- Issues e PRs bem-vindos: https://github.com/deivid22srk/QwenBridge-Custom-Version/issues
 
 ---
 

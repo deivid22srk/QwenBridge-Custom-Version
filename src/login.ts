@@ -130,6 +130,11 @@ async function showMenu() {
       p("    [A]", PURPLE_BRIGHT) + p("  adicionar conta existente", PURPLE),
     );
     console.log(
+      p("    [B]", PURPLE_BRIGHT) +
+        p("  adicionar várias contas em lote", PURPLE) +
+        mute("  · email/senha por linha"),
+    );
+    console.log(
       p("    [C]", PURPLE_BRIGHT) +
         p("  criar contas", PURPLE) +
         mute("  · 1–50 / turno"),
@@ -150,6 +155,10 @@ async function showMenu() {
     }
     if (choice === "A") {
       await addAccountFlow();
+      continue;
+    }
+    if (choice === "B") {
+      await addBatchAccountsFlow();
       continue;
     }
     if (choice === "C") {
@@ -192,6 +201,267 @@ async function addAccountFlow() {
     console.log(err(`\n  ${e.message}`));
   }
   await askPurple("\n  enter… ");
+}
+
+/**
+ * Parse a free-form paste of accounts into a list of {email, password} pairs.
+ *
+ * Accepted formats (any of these will work, mixed):
+ *
+ *   1. One account per pair of lines (most common when pasting from a sheet):
+ *        user1@gmail.com
+ *        senha1
+ *
+ *        user2@gmail.com
+ *        senha2
+ *
+ *   2. `email:password` per line (single or multiple lines):
+ *        user1@gmail.com:senha1
+ *        user2@gmail.com:senha2
+ *
+ *   3. `email password` separated by whitespace/tab:
+ *        user1@gmail.com senha1
+ *        user2@gmail.com senha2
+ *
+ *   4. The env-style format with `;` or `,` separators:
+ *        user1@gmail.com:senha1;user2@gmail.com:senha2
+ *
+ * Blank lines are ignored. Lines starting with `#` are treated as comments.
+ * Email validation is intentionally lenient (anything containing `@`), so the
+ * batch keeps going even if one entry is malformed — the offending entry is
+ * skipped and reported in the summary.
+ */
+function parseBatchAccounts(raw: string): Array<{
+  email: string;
+  password: string;
+  raw: string;
+}> {
+  const out: Array<{ email: string; password: string; raw: string }> = [];
+  if (!raw) return out;
+
+  // 1) Try the env-style single-line format first (contains `;` or `,` with `:`).
+  //    If the entire paste is a single non-empty line, attempt to split it.
+  const trimmed = raw.trim();
+  const singleLine = trimmed.includes("\n") === false;
+  if (singleLine && (trimmed.includes(";") || trimmed.includes(","))) {
+    const sep = trimmed.includes(";") ? ";" : ",";
+    for (const piece of trimmed.split(sep)) {
+      const entry = piece.trim();
+      if (!entry || entry.startsWith("#")) continue;
+      const colonIdx = entry.indexOf(":");
+      if (colonIdx === -1) continue;
+      const email = entry.substring(0, colonIdx).trim();
+      const password = entry.substring(colonIdx + 1).trim();
+      if (email && password && email.includes("@")) {
+        out.push({ email, password, raw: entry });
+      }
+    }
+    if (out.length > 0) return out;
+  }
+
+  // 2) Walk the lines and group "email" + "password" pairs.
+  //    A line is considered an "email" if it contains `@` and has no spaces
+  //    (or it contains `:` / whitespace-separated password after it).
+  const lines = raw
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !l.startsWith("#"));
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Format 2: `email:password` on a single line
+    const colonIdx = line.indexOf(":");
+    if (colonIdx > 0 && line.slice(0, colonIdx).includes("@")) {
+      const email = line.slice(0, colonIdx).trim();
+      const password = line.slice(colonIdx + 1).trim();
+      if (email && password) {
+        out.push({ email, password, raw: line });
+        i++;
+        continue;
+      }
+    }
+
+    // Format 3: `email<space>password` on a single line
+    const spaceIdx = line.search(/\s+/);
+    if (spaceIdx > 0 && line.slice(0, spaceIdx).includes("@")) {
+      const email = line.slice(0, spaceIdx).trim();
+      const password = line.slice(spaceIdx + 1).trim();
+      if (email && password) {
+        out.push({ email, password, raw: line });
+        i++;
+        continue;
+      }
+    }
+
+    // Format 1: email on one line, password on the next
+    if (line.includes("@") && i + 1 < lines.length) {
+      const email = line;
+      const password = lines[i + 1];
+      // Only treat the next line as a password if it does NOT look like an
+      // email itself (avoids eating the next account's email as a password).
+      if (password && !password.includes("@")) {
+        out.push({ email, password, raw: `${email}\n${password}` });
+        i += 2;
+        continue;
+      }
+    }
+
+    // Could not parse this line — skip it
+    i++;
+  }
+
+  return out;
+}
+
+async function addBatchAccountsFlow() {
+  clearTerminal();
+  header("Adicionar várias contas");
+  console.log(
+    mute("  Cole as contas abaixo. Aceita os formatos:\n") +
+      mute("    · email na linha 1, senha na linha 2 (uma conta por par)\n") +
+      mute("    · email:senha (uma conta por linha)\n") +
+      mute("    · email senha  (separados por espaço)\n") +
+      mute("    · user1@x.com:pwd1;user2@x.com:pwd2  (formato .env)\n") +
+      mute("  Linhas em branco são ignoradas. Linhas com # são comentários.\n"),
+  );
+  console.log(
+    p("  › ", PURPLE) +
+      mute("cole as contas e pressione Enter duas vezes para finalizar") +
+      "\n",
+  );
+
+  // Read multiple lines until the user enters an empty line twice in a row
+  // (or a sentinel like `END` / `DONE`).
+  const lines: string[] = [];
+  let emptyStreak = 0;
+  while (true) {
+    const line = await askPurple("  │ ");
+    if (line === "" ) {
+      emptyStreak++;
+      if (emptyStreak >= 2 && lines.length > 0) break;
+      // allow up to one blank line between accounts (format 1 uses blank
+      // lines between pairs); keep collecting.
+      if (lines.length === 0) {
+        // nothing typed yet and the user just pressed enter — bail out.
+        console.log(mute("  cancelado"));
+        await askPurple("  enter… ");
+        return;
+      }
+      lines.push("");
+      continue;
+    }
+    emptyStreak = 0;
+    if (line.toUpperCase() === "END" || line.toUpperCase() === "DONE") break;
+    lines.push(line);
+  }
+
+  const raw = lines.join("\n");
+  const parsed = parseBatchAccounts(raw);
+
+  if (parsed.length === 0) {
+    console.log(err("  nenhuma conta válida encontrada no texto colado"));
+    await askPurple("  enter… ");
+    return;
+  }
+
+  console.log();
+  console.log(
+    p(`  ${parsed.length} conta(s) detectada(s)`, PURPLE_LIGHT) +
+      mute("  · confirmando importação…"),
+  );
+  const confirm = await askPurple("  confirmar? (y/N)  › ");
+  if (confirm.toLowerCase() !== "y") {
+    console.log(mute("  cancelado"));
+    await askPurple("  enter… ");
+    return;
+  }
+
+  console.log();
+  console.log(line());
+
+  let okN = 0;
+  let skipN = 0;
+  let failN = 0;
+  const added: { email: string; id: string }[] = [];
+  const skipped: { email: string; reason: string }[] = [];
+  const failed: { raw: string; reason: string }[] = [];
+
+  for (let i = 0; i < parsed.length; i++) {
+    const { email, password, raw: rawEntry } = parsed[i];
+    const tag = p(`[${i + 1}/${parsed.length}]`, PURPLE_DIM);
+    try {
+      const account = addAccount(email, password);
+      okN++;
+      added.push({ email: account.email, id: account.id });
+      console.log(
+        p(`  ${tag} `, PURPLE) +
+          ok("  ok") +
+          "  " +
+          p(maskEmail(account.email), PURPLE_LIGHT) +
+          mute(`  ${account.id.slice(0, 8)}`),
+      );
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      if (msg.toLowerCase().includes("already exists")) {
+        skipN++;
+        skipped.push({ email, reason: "já existe" });
+        console.log(
+          p(`  ${tag} `, PURPLE) +
+            mute("  skip") +
+            "  " +
+            p(maskEmail(email), PURPLE_MUTED) +
+            mute("  já existe"),
+        );
+      } else {
+        failN++;
+        failed.push({ raw: rawEntry, reason: msg });
+        console.log(
+          p(`  ${tag} `, PURPLE) +
+            err("  erro") +
+            "  " +
+            p(maskEmail(email) || rawEntry.slice(0, 40), PURPLE_VIVID) +
+            mute(`  ${msg}`),
+        );
+      }
+    }
+  }
+
+  console.log(line());
+  console.log(
+    mute("  total ") +
+      p(String(parsed.length), PURPLE_LIGHT) +
+      mute("   ok ") +
+      ok(String(okN)) +
+      mute("   skip ") +
+      p(String(skipN), PURPLE_MUTED) +
+      mute("   fail ") +
+      err(String(failN)),
+  );
+
+  if (added.length > 0) {
+    console.log();
+    console.log(mute("  adicionadas"));
+    for (const a of added) {
+      console.log(
+        p("    · ", PURPLE_DIM) +
+          p(maskEmail(a.email), PURPLE_LIGHT) +
+          mute(`  ${a.id.slice(0, 8)}`),
+      );
+    }
+  }
+  if (skipped.length > 0) {
+    console.log();
+    console.log(mute("  ignoradas (já existiam)"));
+    for (const s of skipped) {
+      console.log(
+        p("    · ", PURPLE_DIM) + p(maskEmail(s.email), PURPLE_MUTED),
+      );
+    }
+  }
+  console.log();
+  await askPurple("  enter… ");
 }
 
 /**
